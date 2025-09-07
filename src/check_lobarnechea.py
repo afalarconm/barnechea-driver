@@ -269,6 +269,10 @@ def main() -> int:
             first_day = days[0]
             times = get_available_times(lid, first_day)
             reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
+            logging.info(
+                f"Disponibilidad encontrada para {name} (lineId={lid}): {first_day}; "
+                f"días={len(days)}, horas={len(times)}"
+            )
             msg = (
                 f"🎉 ¡Hay días con horas para *{name}*!\n"
                 f"Primer día: {first_day}\n"
@@ -281,7 +285,12 @@ def main() -> int:
     if any_available:
         # Enviamos un mensaje por línea para mayor claridad
         for m in msgs:
-            tg_notify(m, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+            logging.info("Enviando notificación por Telegram…")
+            ok = tg_notify(m, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+            if ok:
+                logging.info("Notificación exitosa")
+            else:
+                logging.error("Fallo al enviar notificación")
     else:
         logging.info("Sin días disponibles en este momento.")
 

@@ -33,14 +33,14 @@ export TELEGRAM_BOT_TOKEN="xxx" # Your Telegram bot token
 export TELEGRAM_CHAT_ID="123456789" # Your Telegram chat ID
 
 # run
-python check_lobarnechea.py
+python src/check_lobarnechea.py
 
 # mock example
 export MOCK_LINE_ID=12345 \
   MOCK_LINE_NAME="Renovación" \
   MOCK_DAYS="2025-10-01, 2025-10-02" \
   MOCK_TIMES="09:00, 10:00, 11:00"
-python check_lobarnechea.py
+python src/check_lobarnechea.py
 ```
 
 ## License
