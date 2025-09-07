@@ -1,0 +1,50 @@
+name: Monitor citas Lo Barnechea
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # cada 15 minutos
+  workflow_dispatch: {}       # permite ejecutarlo manualmente
+
+# Least-privilege permissions
+permissions:
+  contents: read
+
+# Ensure only one run per ref at a time
+concurrency:
+  group: monitor-lobarnechea-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          pip install python-dotenv
+
+      - name: Run checker
+        env:
+          # Config por defecto (puedes sobreescribir en Secrets → Actions)
+          SALTALA_BASE: https://saltala.apisaltala.com/api/v1
+          PUBLIC_URL: lobarnechea
+          TARGET_LINE_NAMES: Renovación
+          FALLBACK_LINE_ID: "1768"
+          UNIT_HINT: "277"
+          NUMBER_OF_MONTH: "2"
+
+          # Telegram (ponerlos en GitHub → Settings → Secrets → Actions)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python check_lobarnechea.py
