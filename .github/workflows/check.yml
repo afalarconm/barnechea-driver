@@ -34,7 +34,7 @@ jobs:
 
       - name: Run checker
         env:
-          # Config por defecto (puedes sobreescribir en Secrets → Actions)
+          # Config por defecto
           SALTALA_BASE: https://saltala.apisaltala.com/api/v1
           PUBLIC_URL: lobarnechea
           TARGET_LINE_NAMES: Renovación
