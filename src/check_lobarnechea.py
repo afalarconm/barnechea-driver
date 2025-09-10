@@ -40,6 +40,9 @@ UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chr
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
+# Extra debug: set DEBUG_LOG_PAYLOADS=1 to log sample API payloads
+DEBUG_LOG_PAYLOADS = os.getenv("DEBUG_LOG_PAYLOADS", "0") not in ("", "0", "false", "False")
+
 # --- Mocking helpers (for local testing) ---
 def _env_list(key: str) -> List[str]:
     raw = os.getenv(key, "")
@@ -64,7 +67,7 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     url = f"{BASE_API.rstrip('/')}/{path.lstrip('/')}"
     r = requests.get(url, params=params or {}, headers=_headers(), timeout=TIMEOUT)
     if r.status_code >= 400:
-        logging.error(f"API error {r.status_code} for {url}: {r.text[:500]}")
+        logging.error(f"API error {r.status_code} for {r.url}: {r.text[:500]}")
         raise requests.HTTPError(f"{r.status_code} Error: {r.text}", response=r)
     try:
         js = r.json()
@@ -141,6 +144,20 @@ def list_lines(unit_id: int) -> List[Dict[str, Any]]:
                 lines.append({"id": int(it["id"]), "name": str(it["name"])})
     return lines
 
+def get_line_details(line_id: int) -> Dict[str, Any]:
+    """Obtiene detalles de una línea por id. Puede incluir scheduleUnitId."""
+    try:
+        payload = _get(f"/schedule/public/lines/{line_id}")
+        if DEBUG_LOG_PAYLOADS:
+            logging.info(
+                f"Detalles línea sample (lineId={line_id}): {str(payload)[:200]}"
+            )
+        if isinstance(payload, dict):
+            return payload
+    except Exception as e:
+        logging.error(f"No se pudieron obtener detalles de línea {line_id}: {e}")
+    return {}
+
 def discover_line_ids_for_targets() -> Dict[str, int]:
     """
     Devuelve {nombre_encontrado -> lineId} para los TARGET_LINE_NAMES.
@@ -216,6 +233,36 @@ def parse_available_days(payload: Any) -> List[str]:
                 days.append(token)
     return sorted(set(days))
 
+def parse_available_times(payload: Any) -> List[str]:
+    """Devuelve una lista de horarios (HH:MM) a partir de diferentes esquemas."""
+    times: List[str] = []
+
+    def add_time_like(value: Any) -> None:
+        if isinstance(value, str):
+            # Normalizar HH:MM[:SS]
+            m = re.search(r"\b(\d{2}:\d{2})(?::\d{2})?\b", value)
+            if m:
+                times.append(m.group(1))
+
+    def scan(obj: Any) -> None:
+        if isinstance(obj, list):
+            for it in obj:
+                scan(it)
+        elif isinstance(obj, dict):
+            # claves típicas para times/slots
+            for key in ("times", "hours", "availableTimes", "availableHours", "slots", "items", "data"):
+                if key in obj:
+                    scan(obj[key])
+            # objetos con campos de hora
+            for key in ("hour", "time", "startTime", "start", "hora", "from"):
+                if key in obj:
+                    add_time_like(obj[key])
+        else:
+            add_time_like(obj)
+
+    scan(payload)
+    return sorted(set(times))
+
 def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH) -> List[str]:
     # Mock: devolver días configurados
     if MOCK_DAYS:
@@ -225,22 +272,83 @@ def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH) -> List[str]
         "/schedule/public/getAvailableReservationDays",
         {"lineId": line_id, "numberOfMonth": months},
     )
-    return parse_available_days(payload)
+    days = parse_available_days(payload)
+    if DEBUG_LOG_PAYLOADS:
+        logging.info(
+            f"Payload días sample (lineId={line_id}): "
+            f"{str(payload)[:200]} -> {days[:5]}{'…' if len(days) > 5 else ''}"
+        )
+    return days
 
 def get_available_times(line_id: int, date: str) -> List[str]:
-    """Fetch available reservation times for a specific day."""
+    """Intenta varias combinaciones de endpoint/parámetros para obtener horarios.
+
+    No lanza excepción: ante fallo, registra los intentos y devuelve [].
+    """
     # Mock: devolver horarios configurados
     if MOCK_TIMES:
         return sorted(set(MOCK_TIMES))
 
-    payload = _get("/schedule/public/reservations", {"lineId": line_id, "date": date})
-    times = []
-    # Assuming payload is a list of dicts with 'hour' or 'time' keys; adjust based on actual response
-    if isinstance(payload, list):
-        for slot in payload:
-            if isinstance(slot, dict) and "hour" in slot:  # or whatever key it uses, e.g., "startTime"
-                times.append(str(slot["hour"]))
-    return sorted(set(times))  # Deduplicate and sort
+    attempts_log: List[str] = []
+    line_details = get_line_details(line_id)
+    schedule_unit_id = None
+    for k in ("scheduleUnitId", "schedule_unit_id", "unitId", "schedule_unit"):
+        v = line_details.get(k) if isinstance(line_details, dict) else None
+        if isinstance(v, int):
+            schedule_unit_id = v
+            break
+    endpoints = [
+        "/schedule/public/reservations",
+        "/schedule/public/appointments",
+        "/schedule/public/getAvailableReservationTimes",
+        "/schedule/public/availableHours",
+        "/schedule/public/getTimes",
+    ]
+    date_keys = ["date", "day", "dayDate", "fecha", "reservationDate"]
+    base_variants = [
+        {"lineId": line_id},
+        {"lineId": line_id, "isPublic": True},
+    ]
+    if schedule_unit_id is not None:
+        base_variants.append({"scheduleUnitId": schedule_unit_id})
+        base_variants.append({"scheduleUnitId": schedule_unit_id, "onlyPublic": True})
+
+    for ep in endpoints:
+        for dk in date_keys:
+            for base in base_variants:
+                params = dict(base)
+                params[dk] = date
+                # Para appointments suelen requerir filtros
+                if "appointments" in ep:
+                    params.setdefault("onlyPublic", True)
+                    params.setdefault("appointmentStatuses", [1, 3])
+                try:
+                    payload = _get(ep, params)
+                    times = parse_available_times(payload)
+                    if DEBUG_LOG_PAYLOADS:
+                        logging.info(
+                            f"Payload horas sample (endpoint={ep}, params={params}): "
+                            f"{str(payload)[:200]} -> {times[:10]}{'…' if len(times) > 10 else ''}"
+                        )
+                    if times:
+                        return times
+                    # Guardamos intento sin éxito de parseo
+                    attempts_log.append(f"{ep} {params} -> parsed 0")
+                except requests.HTTPError as e:
+                    r = getattr(e, "response", None)
+                    status = getattr(r, "status_code", "?")
+                    body = getattr(r, "text", str(e))
+                    attempts_log.append(f"{ep} {params} -> {status} {body[:120]}")
+                except Exception as e:
+                    attempts_log.append(f"{ep} {params} -> {type(e).__name__}: {str(e)[:120]}")
+
+    logging.error(
+        (
+            f"No se pudieron obtener horarios (lineId={line_id}, date={date}). "
+            f"Intentos: {' | '.join(attempts_log[:6])}{' | …' if len(attempts_log) > 6 else ''}"
+        )
+    )
+    return []
 
 def main() -> int:
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
