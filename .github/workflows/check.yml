@@ -2,7 +2,7 @@ name: Monitor citas Lo Barnechea
 
 on:
   schedule:
-    - cron: "*/3 * * * *"    # cada 3 minutos
+    - cron: "*/1 * * * *"    # cada 1 minutos
   workflow_dispatch: {}       # permite ejecutarlo manualmente
 
 # Least-privilege permissions
