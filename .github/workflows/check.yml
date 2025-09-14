@@ -2,7 +2,7 @@ name: Monitor citas Lo Barnechea
 
 on:
   schedule:
-    - cron: "*/1 * * * *"    # cada 1 minutos
+    - cron: "*/5 * * * *"    # GitHub Actions effectively supports ~5 min granularity
   workflow_dispatch: {}       # permite ejecutarlo manualmente
 
 # Least-privilege permissions
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run checker
+      - name: Run checker every minute (≈5 min)
         env:
           # Config por defecto
           SALTALA_BASE: https://saltala.apisaltala.com/api/v1
@@ -48,4 +48,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python src/check_lobarnechea.py
+          for i in {1..5}; do
+            echo "[${GITHUB_WORKFLOW}] tick $i/5 at $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+            python src/check_lobarnechea.py || true
+            if [ "$i" -lt 5 ]; then sleep 60; fi
+          done
