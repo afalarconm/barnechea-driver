@@ -32,7 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run checker every minute (≈5 min)
+      - name: Revisar disponibilidad y reservar cita
         env:
           # Config por defecto
           SALTALA_BASE: https://saltala.apisaltala.com/api/v1
@@ -51,7 +51,7 @@ jobs:
           USER_FIRST_NAME: ${{ secrets.USER_FIRST_NAME }}
           USER_LAST_NAME: ${{ secrets.USER_LAST_NAME }}
           USER_EMAIL: ${{ secrets.USER_EMAIL }}
-          USER_PHONE: ${{ secrets.USER_PHONE }}
+          USER_PHONE: ${{ secrets.USER_PHONE }} # Sin codigo pais (+56)
         run: |
           for i in {1..5}; do
             echo "[${GITHUB_WORKFLOW}] tick $i/5 at $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
