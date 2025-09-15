@@ -47,6 +47,11 @@ jobs:
           # Telegram (ponerlos en GitHub → Settings → Secrets → Actions)
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          USER_RUT: ${{ secrets.USER_RUT }}
+          USER_FIRST_NAME: ${{ secrets.USER_FIRST_NAME }}
+          USER_LAST_NAME: ${{ secrets.USER_LAST_NAME }}
+          USER_EMAIL: ${{ secrets.USER_EMAIL }}
+          USER_PHONE: ${{ secrets.USER_PHONE }}
         run: |
           for i in {1..5}; do
             echo "[${GITHUB_WORKFLOW}] tick $i/5 at $(date -u +"%Y-%m-%d %H:%M:%S") UTC"

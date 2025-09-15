@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import re
+import json
 import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -33,6 +34,11 @@ CORPORATION_ID = int(os.getenv("CORPORATION_ID", "0"))
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+USER_RUT = os.getenv("USER_RUT", "")
+USER_FIRST_NAME = os.getenv("USER_FIRST_NAME", "")
+USER_LAST_NAME = os.getenv("USER_LAST_NAME", "")
+USER_EMAIL = os.getenv("USER_EMAIL", "")
+USER_PHONE = os.getenv("USER_PHONE", "")
 
 TIMEOUT = (10, 20)  # (connect, read)
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
@@ -62,6 +68,27 @@ def _headers() -> Dict[str, str]:
         "Origin": f"https://{PUBLIC_URL}.saltala.com",
         "Referer": f"https://{PUBLIC_URL}.saltala.com/",
     }
+
+def _post(path: str, params: Optional[Dict[str, Any]] = None, json_data: Optional[Dict[str, Any]] = None, form_payload: Optional[Dict[str, str]] = None) -> Any:
+    url = f"{BASE_API.rstrip('/')}/{path.lstrip('/')}"
+    
+    # To send multipart/form-data with fields but no files, use `files` param in requests
+    files = {k: (None, v) for k, v in form_payload.items()} if form_payload else None
+
+    r = requests.post(url, params=params or {}, json=json_data, files=files, headers=_headers(), timeout=TIMEOUT)
+    if r.status_code >= 400:
+        log_data = json_data if json_data else form_payload
+        logging.error(f"API error {r.status_code} for {r.url} with data {log_data}: {r.text[:500]}")
+        raise requests.HTTPError(f"{r.status_code} Error: {r.text}", response=r)
+    try:
+        js = r.json()
+    except Exception:
+        return r.text
+
+    # Los endpoints de Saltala suelen venir como {"success": true, "data": ...}
+    if isinstance(js, dict) and "data" in js and isinstance(js.get("success", True), (bool, int)):
+        return js["data"]
+    return js
 
 def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     url = f"{BASE_API.rstrip('/')}/{path.lstrip('/')}"
@@ -281,15 +308,13 @@ def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH) -> List[str]
     return days
 
 def get_available_times(line_id: int, date: str) -> List[str]:
-    """Intenta varias combinaciones de endpoint/parámetros para obtener horarios.
-
-    No lanza excepción: ante fallo, registra los intentos y devuelve [].
-    """
+    """Intenta obtener horarios disponibles para una línea y fecha."""
     # Mock: devolver horarios configurados
     if MOCK_TIMES:
         return sorted(set(MOCK_TIMES))
 
     attempts_log: List[str] = []
+    
     line_details = get_line_details(line_id)
     schedule_unit_id = None
     for k in ("scheduleUnitId", "schedule_unit_id", "unitId", "schedule_unit"):
@@ -297,58 +322,122 @@ def get_available_times(line_id: int, date: str) -> List[str]:
         if isinstance(v, int):
             schedule_unit_id = v
             break
-    endpoints = [
-        "/schedule/public/reservations",
-        "/schedule/public/appointments",
-        "/schedule/public/getAvailableReservationTimes",
-        "/schedule/public/availableHours",
-        "/schedule/public/getTimes",
-    ]
-    date_keys = ["date", "day", "dayDate", "fecha", "reservationDate"]
-    base_variants = [
-        {"lineId": line_id},
-        {"lineId": line_id, "isPublic": True},
-    ]
-    if schedule_unit_id is not None:
-        base_variants.append({"scheduleUnitId": schedule_unit_id})
-        base_variants.append({"scheduleUnitId": schedule_unit_id, "onlyPublic": True})
 
-    for ep in endpoints:
-        for dk in date_keys:
-            for base in base_variants:
-                params = dict(base)
-                params[dk] = date
-                # Para appointments suelen requerir filtros
-                if "appointments" in ep:
-                    params.setdefault("onlyPublic", True)
-                    params.setdefault("appointmentStatuses", [1, 3])
-                try:
-                    payload = _get(ep, params)
-                    times = parse_available_times(payload)
-                    if DEBUG_LOG_PAYLOADS:
-                        logging.info(
-                            f"Payload horas sample (endpoint={ep}, params={params}): "
-                            f"{str(payload)[:200]} -> {times[:10]}{'…' if len(times) > 10 else ''}"
-                        )
-                    if times:
-                        return times
-                    # Guardamos intento sin éxito de parseo
-                    attempts_log.append(f"{ep} {params} -> parsed 0")
-                except requests.HTTPError as e:
-                    r = getattr(e, "response", None)
-                    status = getattr(r, "status_code", "?")
-                    body = getattr(r, "text", str(e))
-                    attempts_log.append(f"{ep} {params} -> {status} {body[:120]}")
-                except Exception as e:
-                    attempts_log.append(f"{ep} {params} -> {type(e).__name__}: {str(e)[:120]}")
+    # Intento 1: GET a /appointments con scheduleUnitId, que pareció el más prometedor
+    if schedule_unit_id:
+        try:
+            params = {
+                "scheduleUnitId": schedule_unit_id,
+                "onlyPublic": True,
+                "date": date,
+                "appointmentStatuses": [1, 3]
+            }
+            payload = _get("/schedule/public/appointments", params)
+            times = parse_available_times(payload)
+            if DEBUG_LOG_PAYLOADS:
+                logging.info(f"Payload horas (GET /appointments): {str(payload)[:200]} -> {len(times)} times")
+            if times:
+                return times
+            attempts_log.append(f"GET /appointments {params} -> parsed 0")
+        except requests.HTTPError as e:
+            # Un 404 con "no se encontraron" es un "éxito" (no hay horas), no un error de request
+            if e.response and e.response.status_code == 404 and "no se encontraron" in e.response.text.lower():
+                 attempts_log.append(f"GET /appointments {params} -> 404 No hay horas")
+            else:
+                attempts_log.append(f"GET /appointments {params} -> HTTP {e.response.status_code if e.response else '??'}")
+        except Exception as e:
+            attempts_log.append(f"GET /appointments {params} -> {type(e).__name__}")
 
-    logging.error(
-        (
-            f"No se pudieron obtener horarios (lineId={line_id}, date={date}). "
-            f"Intentos: {' | '.join(attempts_log[:6])}{' | …' if len(attempts_log) > 6 else ''}"
+    # Intento 2: POST a un endpoint que podría devolver horas
+    try:
+        payload = _post(
+            "/schedule/public/getAvailableReservationTimes",
+            json_data={"lineId": line_id, "date": date},
         )
-    )
+        times = parse_available_times(payload)
+        if DEBUG_LOG_PAYLOADS:
+            logging.info(f"Payload horas (POST /getAvailable...): {str(payload)[:200]} -> {len(times)} times")
+        if times:
+            return times
+        attempts_log.append(f"POST /getAvailable... with lineId -> parsed 0")
+    except Exception:
+        attempts_log.append(f"POST /getAvailable... with lineId -> failed")
+
+    if attempts_log:
+        logging.warning(
+            f"No se pudieron obtener horarios (lineId={line_id}, date={date}). Intentos: {' | '.join(attempts_log)}"
+        )
     return []
+
+
+def book_appointment(line_id: int, date: str, time: str) -> bool:
+    """Intenta reservar una hora. Devuelve True si fue exitoso."""
+    if not USER_RUT or not USER_FIRST_NAME or not USER_LAST_NAME:
+        logging.warning("Faltan datos de usuario (RUT, nombre, apellido), no se puede reservar.")
+        return False
+
+    full_datetime_str = f"{date}T{time}:00"
+    block_payload = {"lineId": line_id, "date": full_datetime_str}
+
+    # Step 1: Add a temporary reservation block
+    try:
+        logging.info(f"Bloqueando temporalmente el horario {date} {time}...")
+        _post("/schedule/public/addReservationTemporalBlock", json_data=block_payload)
+        logging.info("Bloqueo temporal exitoso.")
+    except Exception as e:
+        logging.error(f"No se pudo bloquear el horario: {e}")
+        return False
+
+    # Step 2: Generate the reservation with user details
+    try:
+        logging.info("Enviando datos para generar la reserva...")
+        
+        fields = [
+            {"fieldId": "rut", "value": USER_RUT},
+            {"fieldId": "nombres", "value": USER_FIRST_NAME},
+            {"fieldId": "apellidos", "value": USER_LAST_NAME},
+        ]
+        if USER_EMAIL:
+            fields.append({"fieldId": "correo", "value": USER_EMAIL})
+        if USER_PHONE:
+            fields.append({"fieldId": "telefono", "value": USER_PHONE})
+
+        reservation_payload = {
+            "lineId": line_id,
+            "date": full_datetime_str,
+            "fields": fields
+        }
+        
+        form_data = {'payload': json.dumps(reservation_payload)}
+        
+        result = _post("/schedule/public/generateReservation", form_payload=form_data)
+        logging.info(f"Reserva generada exitosamente! Respuesta: {str(result)[:300]}")
+        
+        # Notificar éxito de reserva
+        msg = (
+            f"✅ ¡Cita para Renovación agendada!\n"
+            f"Día: {date}\n"
+            f"Hora: {time}\n"
+            f"RUT: {USER_RUT}\n"
+            f"Nombre: {USER_FIRST_NAME} {USER_LAST_NAME}"
+        )
+        if USER_EMAIL:
+            msg += f"\nEmail: {USER_EMAIL}"
+        if USER_PHONE:
+            msg += f"\nTeléfono: {USER_PHONE}"
+
+        tg_notify(msg, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        return True
+    except Exception as e:
+        logging.error(f"Falló el intento de generar la reserva: {e}")
+        # Cleanup: remove temporary block
+        try:
+            logging.info("Intentando liberar el bloqueo temporal...")
+            _post("/schedule/public/removeReservationTemporalBlock", json_data=block_payload)
+        except Exception as e_remove:
+            logging.error(f"No se pudo liberar el bloqueo: {e_remove}")
+        return False
+
 
 def main() -> int:
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -362,46 +451,53 @@ def main() -> int:
 
     logging.info("Líneas objetivo: " + str(targets))
 
-    # 2) Consultar días para cada línea
-    any_available = False
-    msgs = []
+    # 2) Consultar y reservar
     for name, lid in targets.items():
         try:
             days = get_available_days(lid, NUMBER_OF_MONTH)
         except Exception as e:
-            logging.error(f"Error consultando días (lineId={lid}): {e}")
+            logging.error(f"Error consultando días para {name} (lineId={lid}): {e}")
             continue
 
-        if days:
-            any_available = True
-            first_day = days[0]
-            times = get_available_times(lid, first_day)
-            reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
-            logging.info(
-                f"Disponibilidad encontrada para {name} (lineId={lid}): {first_day}; "
-                f"días={len(days)}, horas={len(times)}"
-            )
-            msg = (
-                f"🎉 ¡Hay días con horas para *{name}*!\n"
-                f"Primer día: {first_day}\n"
-                f"Horarios disponibles ({len(times)}): {', '.join(times[:5])}{'…' if len(times) > 5 else ''}\n"
-                f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
-                f"Reserva: {reserva_url}"
-            )
-            msgs.append(msg)
+        if not days:
+            continue
 
-    if any_available:
-        # Enviamos un mensaje por línea para mayor claridad
-        for m in msgs:
-            logging.info("Enviando notificación por Telegram…")
-            ok = tg_notify(m, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-            if ok:
-                logging.info("Notificación exitosa")
+        # Encontramos días, procesamos el primero y salimos.
+        first_day = days[0]
+        logging.info(f"Disponibilidad para {name} el {first_day} (total días: {len(days)})")
+
+        times = get_available_times(lid, first_day)
+        if times:
+            first_time = times[0]
+            logging.info(f"Horarios disponibles: {times}. Intentando reservar a las {first_time}.")
+            
+            if book_appointment(lid, first_day, first_time):
+                logging.info(f"Reserva para {name} completada.")
+                return 0  # Éxito
             else:
-                logging.error("Fallo al enviar notificación")
-    else:
-        logging.info("Sin días disponibles en este momento.")
+                logging.error(f"Falló la reserva para {name}. Se notificará la disponibilidad.")
+        else:
+            logging.warning(f"No se pudieron obtener horarios para {name} el {first_day}.")
 
+        # Notificar disponibilidad (si la reserva falló o no había horas)
+        reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
+        msg = (
+            f"🎉 ¡Hay disponibilidad para *{name}*!\n"
+            f"Primer día: {first_day}\n"
+        )
+        if times:
+            msg += f"Horarios ({len(times)}): {', '.join(times[:5])}{'…' if len(times) > 5 else ''}\n"
+        else:
+            msg += "No se pudieron obtener los horarios.\n"
+        msg += f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
+        msg += f"Reserva manual: {reserva_url}"
+        
+        tg_notify(msg, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        
+        # Salimos después de encontrar la primera disponibilidad
+        return 0
+
+    logging.info("Sin días disponibles en este momento.")
     return 0
 
 if __name__ == "__main__":
