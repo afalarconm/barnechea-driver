@@ -3,24 +3,29 @@ import os
 import re
 import json
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Set
 
-import requests
 import logging
+import requests
 from dotenv import load_dotenv
-from telegram_notifier import tg_notify
 
-# Load .env for local runs
 load_dotenv()
+
+from kapso_notifier import (  # noqa: E402
+    send_template_message,
+    send_whatsapp_message,
+    get_active_users,
+    get_pending_users_for_followup,
+    update_user_status,
+)
 
 BASE_API = os.getenv("SALTALA_BASE", "https://saltala.apisaltala.com/api/v1")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "lobarnechea")
 
-# Objetivo inicial: solo Renovación, pero se puede pasar más de uno (coma-separado)
 TARGET_LINE_NAMES_RAW = os.getenv("TARGET_LINE_NAMES", "Renovación")
 TARGET_LINE_NAMES = [s.strip() for s in TARGET_LINE_NAMES_RAW.split(",") if s.strip()]
-
 # Pistas / fallback
 FALLBACK_LINE_ID = int(os.getenv("FALLBACK_LINE_ID", "1768"))
 UNIT_HINT = os.getenv("UNIT_HINT", "277")
@@ -31,17 +36,10 @@ NUMBER_OF_MONTH = int(os.getenv("NUMBER_OF_MONTH", "2"))
 
 CORPORATION_ID = int(os.getenv("CORPORATION_ID", "0"))
 
-# Telegram
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-USER_RUT = os.getenv("USER_RUT", "")
-USER_FIRST_NAME = os.getenv("USER_FIRST_NAME", "")
-USER_LAST_NAME = os.getenv("USER_LAST_NAME", "")
-USER_EMAIL = os.getenv("USER_EMAIL", "")
-USER_PHONE = os.getenv("USER_PHONE", "")
-
 TIMEOUT = (10, 20)  # (connect, read)
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
+TZ_NAME = os.getenv("TZ_NAME", "America/Santiago")  # used to compute correct offset per date (DST-safe)
+TZ_OFFSET = os.getenv("TZ_OFFSET", "")  # optional override like "-03:00" (takes precedence over TZ_NAME)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
@@ -94,7 +92,13 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     url = f"{BASE_API.rstrip('/')}/{path.lstrip('/')}"
     r = requests.get(url, params=params or {}, headers=_headers(), timeout=TIMEOUT)
     if r.status_code >= 400:
-        logging.error(f"API error {r.status_code} for {r.url}: {r.text[:500]}")
+        # Common "no availability" responses come back as 404 with a short message.
+        # Don't spam ERROR logs for that expected case.
+        body_lower = (r.text or "").lower()
+        if r.status_code == 404 and "no se encontraron horas disponibles" in body_lower:
+            logging.info(f"No hay horas disponibles (404) para {r.url}")
+        else:
+            logging.error(f"API error {r.status_code} for {r.url}: {r.text[:500]}")
         raise requests.HTTPError(f"{r.status_code} Error: {r.text}", response=r)
     try:
         js = r.json()
@@ -290,15 +294,53 @@ def parse_available_times(payload: Any) -> List[str]:
     scan(payload)
     return sorted(set(times))
 
-def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH) -> List[str]:
+def _normalize_patient_rut(value: str) -> str:
+    """
+    Devuelve una versión solo-dígitos del RUT. Para evitar asumir reglas del dígito verificador,
+    no removemos el último dígito automáticamente.
+    """
+    if not value:
+        return ""
+    digits = re.sub(r"\D", "", value)
+    return digits
+
+def _format_offset(td) -> str:
+    if td is None:
+        return "-00:00"
+    total = int(td.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    hh = total // 3600
+    mm = (total % 3600) // 60
+    return f"{sign}{hh:02d}:{mm:02d}"
+
+def _offset_for_date(date_str: str) -> str:
+    """
+    Returns an ISO offset like -03:00 for the given YYYY-MM-DD.
+    - If TZ_OFFSET is set, uses it.
+    - Else computes from TZ_NAME (DST-safe).
+    """
+    if TZ_OFFSET:
+        return TZ_OFFSET
+    try:
+        tz = ZoneInfo(TZ_NAME)
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        # local midnight; offset at that local time
+        local = d.replace(tzinfo=tz)
+        return _format_offset(local.utcoffset())
+    except Exception:
+        # safe fallback
+        return "-03:00"
+
+def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH, patient_rut: str = "") -> List[str]:
     # Mock: devolver días configurados
     if MOCK_DAYS:
         return sorted(set(MOCK_DAYS))
 
-    payload = _get(
-        "/schedule/public/getAvailableReservationDays",
-        {"lineId": line_id, "numberOfMonth": months},
-    )
+    params: Dict[str, Any] = {"lineId": line_id, "numberOfMonth": months}
+    if patient_rut:
+        params["patientRut"] = patient_rut
+    payload = _get("/schedule/public/getAvailableReservationDays", params)
     days = parse_available_days(payload)
     if DEBUG_LOG_PAYLOADS:
         logging.info(
@@ -307,72 +349,38 @@ def get_available_days(line_id: int, months: int = NUMBER_OF_MONTH) -> List[str]
         )
     return days
 
-def get_available_times(line_id: int, date: str) -> List[str]:
+def get_available_times(line_id: int, date: str, patient_rut: str = "") -> List[str]:
     """Intenta obtener horarios disponibles para una línea y fecha."""
     # Mock: devolver horarios configurados
     if MOCK_TIMES:
         return sorted(set(MOCK_TIMES))
 
-    attempts_log: List[str] = []
-    
-    line_details = get_line_details(line_id)
-    schedule_unit_id = None
-    for k in ("scheduleUnitId", "schedule_unit_id", "unitId", "schedule_unit"):
-        v = line_details.get(k) if isinstance(line_details, dict) else None
-        if isinstance(v, int):
-            schedule_unit_id = v
-            break
 
-    # Intento 1: GET a /appointments con scheduleUnitId, que pareció el más prometedor
-    if schedule_unit_id:
-        try:
-            params = {
-                "scheduleUnitId": schedule_unit_id,
-                "onlyPublic": True,
-                "date": date,
-                "appointmentStatuses": [1, 3]
-            }
-            payload = _get("/schedule/public/appointments", params)
-            times = parse_available_times(payload)
-            if DEBUG_LOG_PAYLOADS:
-                logging.info(f"Payload horas (GET /appointments): {str(payload)[:200]} -> {len(times)} times")
-            if times:
-                return times
-            attempts_log.append(f"GET /appointments {params} -> parsed 0")
-        except requests.HTTPError as e:
-            # Un 404 con "no se encontraron" es un "éxito" (no hay horas), no un error de request
-            if e.response and e.response.status_code == 404 and "no se encontraron" in e.response.text.lower():
-                 attempts_log.append(f"GET /appointments {params} -> 404 No hay horas")
-            else:
-                attempts_log.append(f"GET /appointments {params} -> HTTP {e.response.status_code if e.response else '??'}")
-        except Exception as e:
-            attempts_log.append(f"GET /appointments {params} -> {type(e).__name__}")
+    offset = _offset_for_date(date)
+    start_time = f"{date}T00:00:00{offset}"
+    end_time = f"{date}T23:59:59{offset}"
+    params: Dict[str, Any] = {"lineId": line_id, "startTime": start_time, "endTime": end_time}
 
-    # Intento 2: POST a un endpoint que podría devolver horas
+    if patient_rut:
+        params["patientRut"] = patient_rut
+
     try:
-        payload = _post(
-            "/schedule/public/getAvailableReservationTimes",
-            json_data={"lineId": line_id, "date": date},
-        )
+        payload = _get("/schedule/public/reservations", params=params)
         times = parse_available_times(payload)
         if DEBUG_LOG_PAYLOADS:
-            logging.info(f"Payload horas (POST /getAvailable...): {str(payload)[:200]} -> {len(times)} times")
-        if times:
-            return times
-        attempts_log.append(f"POST /getAvailable... with lineId -> parsed 0")
-    except Exception:
-        attempts_log.append(f"POST /getAvailable... with lineId -> failed")
-
-    if attempts_log:
-        logging.warning(
-            f"No se pudieron obtener horarios (lineId={line_id}, date={date}). Intentos: {' | '.join(attempts_log)}"
-        )
-    return []
+            logging.info(f"Payload horas (GET /reservations): {str(payload)[:200]} -> {len(times)} times")
+        return times
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            # treat as no slots / not found
+            return []
+        logging.error(f"Error obteniendo horarios via /reservations: {e}")
+        return []
 
 
-def book_appointment(line_id: int, date: str, time: str) -> bool:
+def book_appointment(line_id: int, date: str, time: str, user_rut: str, user_first_name: str, user_last_name: str, user_email: Optional[str] = None, user_phone: Optional[str] = None) -> bool:
     """Intenta reservar una hora. Devuelve True si fue exitoso."""
-    if not USER_RUT or not USER_FIRST_NAME or not USER_LAST_NAME:
+    if not user_rut or not user_first_name or not user_last_name:
         logging.warning("Faltan datos de usuario (RUT, nombre, apellido), no se puede reservar.")
         return False
 
@@ -393,14 +401,14 @@ def book_appointment(line_id: int, date: str, time: str) -> bool:
         logging.info("Enviando datos para generar la reserva...")
         
         fields = [
-            {"fieldId": "rut", "value": USER_RUT},
-            {"fieldId": "nombres", "value": USER_FIRST_NAME},
-            {"fieldId": "apellidos", "value": USER_LAST_NAME},
+            {"fieldId": "rut", "value": user_rut},
+            {"fieldId": "nombres", "value": user_first_name},
+            {"fieldId": "apellidos", "value": user_last_name},
         ]
-        if USER_EMAIL:
-            fields.append({"fieldId": "correo", "value": USER_EMAIL})
-        if USER_PHONE:
-            fields.append({"fieldId": "telefono", "value": USER_PHONE})
+        if user_email:
+            fields.append({"fieldId": "correo", "value": user_email})
+        if user_phone:
+            fields.append({"fieldId": "telefono", "value": user_phone})
 
         reservation_payload = {
             "lineId": line_id,
@@ -413,20 +421,7 @@ def book_appointment(line_id: int, date: str, time: str) -> bool:
         result = _post("/schedule/public/generateReservation", form_payload=form_data)
         logging.info(f"Reserva generada exitosamente! Respuesta: {str(result)[:300]}")
         
-        # Notificar éxito de reserva
-        msg = (
-            f"✅ ¡Cita para Renovación agendada!\n"
-            f"Día: {date}\n"
-            f"Hora: {time}\n"
-            f"RUT: {USER_RUT}\n"
-            f"Nombre: {USER_FIRST_NAME} {USER_LAST_NAME}"
-        )
-        if USER_EMAIL:
-            msg += f"\nEmail: {USER_EMAIL}"
-        if USER_PHONE:
-            msg += f"\nTeléfono: {USER_PHONE}"
 
-        tg_notify(msg, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         return True
     except Exception as e:
         logging.error(f"Falló el intento de generar la reserva: {e}")
@@ -443,7 +438,36 @@ def main() -> int:
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     logging.info(f"[{started}] Chequeando disponibilidad…")
 
-    # 1) Descubrir lineId(s)
+    # 1) Fetch users from Kapso
+    active_users = get_active_users()
+    pending_users = get_pending_users_for_followup(hours=1)
+
+    # If there are no registered users at all, do nothing (skip API checks entirely).
+    if not active_users and not pending_users:
+        logging.info("No hay usuarios registrados en Kapso. No se realiza chequeo.")
+        return 0
+
+    autobook_users = [u for u in active_users if u.get("mode") == "autobook"]
+    notify_users = [u for u in active_users if u.get("mode") == "notify"]
+    
+    logging.info(f"Usuarios activos: {len(active_users)} total ({len(autobook_users)} auto-book, {len(notify_users)} notify-only)")
+
+    # 2) Send follow-ups to users pending >1 hour
+    for user in pending_users:
+        phone = user.get("phone", "")
+        if phone:
+            msg = "¿Completaste tu reserva manual? Responde SÍ o DONE para desactivar las notificaciones."
+            send_whatsapp_message(phone, msg)
+            logging.info(f"Follow-up enviado a {phone}")
+
+    # Use any registered user's RUT (digits-only) for endpoints that require patientRut
+    patient_rut = ""
+    for user in (active_users + pending_users):
+        patient_rut = _normalize_patient_rut(str(user.get("rut", "") or ""))
+        if patient_rut:
+            break
+
+    # 3) Descubrir lineId(s)
     targets = discover_line_ids_for_targets()
     if not targets:
         # fallback a mano si no encontramos nada
@@ -451,10 +475,10 @@ def main() -> int:
 
     logging.info("Líneas objetivo: " + str(targets))
 
-    # 2) Consultar y reservar
+    # 4) Consultar disponibilidad
     for name, lid in targets.items():
         try:
-            days = get_available_days(lid, NUMBER_OF_MONTH)
+            days = get_available_days(lid, NUMBER_OF_MONTH, patient_rut=patient_rut)
         except Exception as e:
             logging.error(f"Error consultando días para {name} (lineId={lid}): {e}")
             continue
@@ -462,39 +486,78 @@ def main() -> int:
         if not days:
             continue
 
-        # Encontramos días, procesamos el primero y salimos.
+        # Encontramos días, procesamos el primero
         first_day = days[0]
         logging.info(f"Disponibilidad para {name} el {first_day} (total días: {len(days)})")
 
-        times = get_available_times(lid, first_day)
-        if times:
-            first_time = times[0]
-            logging.info(f"Horarios disponibles: {times}. Intentando reservar a las {first_time}.")
-            
-            if book_appointment(lid, first_day, first_time):
-                logging.info(f"Reserva para {name} completada.")
-                return 0  # Éxito
-            else:
-                logging.error(f"Falló la reserva para {name}. Se notificará la disponibilidad.")
-        else:
-            logging.warning(f"No se pudieron obtener horarios para {name} el {first_day}.")
-
-        # Notificar disponibilidad (si la reserva falló o no había horas)
+        times = get_available_times(lid, first_day, patient_rut=patient_rut)
         reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
-        msg = (
-            f"🎉 ¡Hay disponibilidad para *{name}*!\n"
-            f"Primer día: {first_day}\n"
-        )
-        if times:
-            msg += f"Horarios ({len(times)}): {', '.join(times[:5])}{'…' if len(times) > 5 else ''}\n"
-        else:
-            msg += "No se pudieron obtener los horarios.\n"
-        msg += f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
-        msg += f"Reserva manual: {reserva_url}"
         
-        tg_notify(msg, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        # 5) Attempt auto-booking for first autobook user (FIFO)
+        booked_user = None
+        if times and autobook_users:
+            first_time = times[0]
+            first_user = autobook_users[0]  # Already sorted by registered_at
+            logging.info(f"Intentando auto-booking para {first_user.get('phone')} a las {first_time}...")
+            
+            if book_appointment(
+                lid, first_day, first_time,
+                first_user.get("rut", ""),
+                first_user.get("first_name", ""),
+                first_user.get("last_name", ""),
+                first_user.get("email"),
+                first_user.get("phone")
+            ):
+                booked_user = first_user
+                # Deactivate the user who got booked
+                update_user_status(first_user.get("id"), "inactive")
+                # Notify them of success
+                success_msg = (
+                    f"✅ ¡Cita agendada exitosamente!\n"
+                    f"Día: {first_day}\n"
+                    f"Hora: {first_time}\n"
+                    f"Reserva: {reserva_url}"
+                )
+                send_whatsapp_message(first_user.get("phone", ""), success_msg)
+                logging.info(f"Auto-booking exitoso para {first_user.get('phone')}")
+            else:
+                logging.error(f"Auto-booking falló para {first_user.get('phone')}")
+
+        # 6) Notify all active users (including notify-only and remaining autobook users)
+        notified_user_ids = []
+        for user in active_users:
+            # Skip if already booked
+            if booked_user and user.get("id") == booked_user.get("id"):
+                continue
+            
+            phone = user.get("phone", "")
+            if not phone:
+                continue
+            
+            # Build notification message
+            msg = (
+                f"🎉 ¡Hay disponibilidad para *{name}*!\n"
+                f"Primer día: {first_day}\n"
+            )
+            if times:
+                msg += f"Horarios ({len(times)}): {', '.join(times[:5])}{'…' if len(times) > 5 else ''}\n"
+            else:
+                msg += "No se pudieron obtener los horarios.\n"
+            msg += f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
+            msg += f"Reserva: {reserva_url}"
+            
+            # Try template first, fallback to regular message
+            if send_template_message(phone, "slot_available", [first_day, reserva_url]):
+                notified_user_ids.append(user.get("id"))
+            elif send_whatsapp_message(phone, msg):
+                notified_user_ids.append(user.get("id"))
         
-        # Salimos después de encontrar la primera disponibilidad
+        # 7) Update notified users to pending status
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        for user_id in notified_user_ids:
+            update_user_status(user_id, "pending", notified_at=now_iso)
+        
+        # If we found availability, exit after processing
         return 0
 
     logging.info("Sin días disponibles en este momento.")
