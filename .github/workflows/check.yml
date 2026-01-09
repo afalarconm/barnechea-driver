@@ -42,14 +42,38 @@ jobs:
           UNIT_HINT: "277"
           NUMBER_OF_MONTH: "2"
 
+          CHECK_EVERY_SECONDS: "60"
+          RUN_FOR_SECONDS: "290"
+
           DEBUG_LOG_PAYLOADS: ${{ secrets.DEBUG_LOG_PAYLOADS }}
 
           # Kapso (ponerlos en GitHub → Settings → Secrets → Actions)
           KAPSO_API_KEY: ${{ secrets.KAPSO_API_KEY }}
           KAPSO_PHONE_NUMBER_ID: ${{ secrets.KAPSO_PHONE_NUMBER_ID }}
         run: |
-          for i in {1..5}; do
-            echo "[${GITHUB_WORKFLOW}] tick $i/5 at $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+          # GitHub scheduled workflows are best-effort and effectively capped at ~5 minute granularity.
+          # To check more often than the scheduler allows, we poll in a tight window within a single run.
+          #
+          # Tune these if desired:
+          # - CHECK_EVERY_SECONDS: how often to run the checker within the job
+          # - RUN_FOR_SECONDS: total wall-clock seconds to keep polling (keep < 300 to avoid overlap/cancellation)
+          CHECK_EVERY_SECONDS="${CHECK_EVERY_SECONDS:-60}"
+          RUN_FOR_SECONDS="${RUN_FOR_SECONDS:-290}"
+
+          start_ts="$(date +%s)"
+          tick=0
+
+          while true; do
+            tick=$((tick + 1))
+            echo "[${GITHUB_WORKFLOW}] tick ${tick} at $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
             python src/check_lobarnechea.py || true
-            if [ "$i" -lt 5 ]; then sleep 60; fi
+
+            now_ts="$(date +%s)"
+            elapsed="$((now_ts - start_ts))"
+            if [ "${elapsed}" -ge "${RUN_FOR_SECONDS}" ]; then
+              echo "[${GITHUB_WORKFLOW}] done after ${elapsed}s (target ${RUN_FOR_SECONDS}s)"
+              break
+            fi
+
+            sleep "${CHECK_EVERY_SECONDS}"
           done
