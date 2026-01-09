@@ -86,6 +86,19 @@ python src/check_lobarnechea.py
 4. **Notifications**: All active users are notified via WhatsApp when slots are found
 5. **Follow-up**: Users marked as "pending" receive a follow-up message after 1 hour asking if they completed their booking
 
+## Landing Page
+
+The `docs/` folder contains a static landing page for the service. It's designed to be deployed via GitHub Pages.
+
+### Deploy to GitHub Pages
+
+1. Go to **Settings > Pages** in your GitHub repository
+2. Under "Source", select **Deploy from a branch**
+3. Select the `main` branch and `/docs` folder
+4. Click **Save**
+
+Your site will be available at `https://yourusername.github.io/barnechea-driver/`
+
 ## License
 
 MIT
