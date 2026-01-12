@@ -14,12 +14,12 @@ permissions:
 # Ensures only one runner is active at a time
 concurrency:
   group: monitor-lobarnechea
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   poll-api:
     runs-on: ubuntu-latest
-    timeout-minutes: 25   # Slightly longer than the loop to allow for setup/relay
+    timeout-minutes: 30
     
     steps:
       - name: Checkout code
@@ -55,7 +55,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           START_TS=$(date +%s)
-          RUNTIME=1200 # Run for 20 minutes (1200 seconds)
+          RUNTIME=1140 # 19 minutes
           SLEEP_TIME=60 # Check every 60 seconds
           TICK=0
           
@@ -70,10 +70,16 @@ jobs:
             
             # 1. Run the checker
             echo "[${CURRENT_TIME} UTC] Poll #${TICK} - Checking availability..."
-            if python src/check_lobarnechea.py; then
+            python src/check_lobarnechea.py
+            EXIT_CODE=$?
+            # Exit code 42 means "availability was found and processed" (notify/booking).
+            # In that case, stop early and hand off to the next relay run.
+            if [ "${EXIT_CODE}" -eq 42 ]; then
+              echo "[${CURRENT_TIME} UTC] Availability handled (exit 42). Stopping early for relay."
+              break
+            elif [ "${EXIT_CODE}" -eq 0 ]; then
               echo "[${CURRENT_TIME} UTC] Poll #${TICK} completed successfully"
             else
-              EXIT_CODE=$?
               echo "::warning::Poll #${TICK} exited with code ${EXIT_CODE}, continuing..."
             fi
             
