@@ -281,11 +281,32 @@ def parse_available_times(payload: Any) -> List[str]:
                 scan(it)
         elif isinstance(obj, dict):
             # claves típicas para times/slots
-            for key in ("times", "hours", "availableTimes", "availableHours", "slots", "items", "data"):
+            for key in (
+                "times",
+                "hours",
+                "availableTimes",
+                "availableHours",
+                "slots",
+                "items",
+                "data",
+                # Saltala payloads seen in the wild
+                "reservations",
+                "reservationsById",
+            ):
                 if key in obj:
                     scan(obj[key])
             # objetos con campos de hora
-            for key in ("hour", "time", "startTime", "start", "hora", "from"):
+            for key in (
+                "hour",
+                "time",
+                "startTime",
+                "start",
+                "hora",
+                "from",
+                # Saltala payloads sometimes include ISO datetimes here
+                "reservationDate",
+                "reservation_date",
+            ):
                 if key in obj:
                     add_time_like(obj[key])
         else:
@@ -442,6 +463,21 @@ def main() -> int:
     active_users = get_active_users()
     pending_users = get_pending_users_for_followup(hours=1)
 
+    # Defensive FIFO: ensure users are ordered by registration time (oldest first),
+    # even if the upstream API ignores/changes ordering semantics.
+    def _parse_iso_dt(value: Any) -> datetime:
+        if not isinstance(value, str) or not value:
+            return datetime.max
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return datetime.max
+
+    active_users = sorted(
+        active_users,
+        key=lambda u: (_parse_iso_dt((u or {}).get("registered_at")), str((u or {}).get("id", ""))),
+    )
+
     # If there are no registered users at all, do nothing (skip API checks entirely).
     if not active_users and not pending_users:
         logging.info("No hay usuarios registrados en Kapso. No se realiza chequeo.")
@@ -546,8 +582,7 @@ def main() -> int:
             msg += f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
             msg += f"Reserva: {reserva_url}"
             
-            # Try template first, fallback to regular message
-            if send_template_message(phone, "slot_available", [first_day, reserva_url]):
+            if send_template_message(phone, "slot_available", [first_day]):
                 notified_user_ids.append(user.get("id"))
             elif send_whatsapp_message(phone, msg):
                 notified_user_ids.append(user.get("id"))
