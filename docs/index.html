@@ -630,12 +630,17 @@
             justify-self: end;
         }
 
+        .footer-content > * {
+            padding: 0;
+            margin: 0;
+        }
+
         .footer-logo {
             font-weight: 600;
             font-size: 0.875rem;
             display: flex;
             align-items: center;
-            line-height: 1.4;
+            line-height: 1;
         }
 
         .footer-logo img {
@@ -647,11 +652,14 @@
 
         .footer-text {
             opacity: 0.75;
-            font-size: 0.875rem;
+            font-size: 0.75rem;
             margin: 0;
             padding: 0;
-            text-align: center;
-            line-height: 1.4;
+            text-align: right;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
         }
 
         .footer-text a {
@@ -669,6 +677,8 @@
         .footer-links {
             display: flex;
             gap: 1.5rem;
+            justify-content: center;
+            align-items: center;
         }
 
         .footer-links a {
@@ -676,7 +686,7 @@
             opacity: 0.75;
             text-decoration: none;
             font-size: 0.875rem;
-            line-height: 1.4;
+            line-height: 1;
             transition: opacity 0.2s;
         }
 
@@ -742,6 +752,10 @@
             .footer-logo {
                 justify-content: center;
             }
+
+            .footer-text {
+                text-align: center;
+            }
         }
 
         @media (max-width: 480px) {
@@ -782,7 +796,7 @@
                 </div>
                 <h1>Nunca más pierdas una <span>hora disponible</span> para tu licencia</h1>
                 <p class="hero-text">
-                    Recibe alertas instantáneas por WhatsApp cuando haya disponibilidad para renovar o sacar tu licencia de conducir en Lo Barnechea.
+                    Recibe alertas instantáneas por WhatsApp cuando haya disponibilidad para renovar tu licencia de conducir en Lo Barnechea.
                 </p>
                 <div class="cta-group">
                     <a href="https://wa.me/12029882345" class="btn btn-primary" target="_blank" rel="noopener">
@@ -990,10 +1004,10 @@
                         BarnecheaDriver
                     </div>
                 </div>
-                <p class="footer-text">Hecho con ❤️ por <a href="https://github.com/afalarconm" target="_blank" rel="noopener">Fede Alarcón</a></p>
                 <div class="footer-links">
                     <a href="https://lobarnechea.saltala.com" target="_blank" rel="noopener">Página oficial de reservas</a>
                 </div>
+                <div class="footer-text">Hecho con&nbsp;☕&nbsp;por&nbsp;<a href="https://github.com/afalarconm" target="_blank" rel="noopener">Fede Alarcón</a></div>
             </div>
         </footer>
     </section>
