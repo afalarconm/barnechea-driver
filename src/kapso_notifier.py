@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 KAPSO_API_KEY = os.getenv("KAPSO_API_KEY", "")
 KAPSO_PHONE_NUMBER_ID = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
@@ -21,13 +21,16 @@ def _parse_iso_datetime(value: Any) -> datetime:
     Accepts strings like "2026-01-12T12:34:56Z".
     """
     if not isinstance(value, str) or not value:
-        return datetime.max
+        return datetime.max.replace(tzinfo=timezone.utc)
     try:
         # Python doesn't accept trailing "Z" in fromisoformat; convert to +00:00.
         v = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(v)
+        dt = datetime.fromisoformat(v)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
-        return datetime.max
+        return datetime.max.replace(tzinfo=timezone.utc)
 
 def _normalize_whatsapp_to(to_phone: str) -> str:
     """
@@ -174,6 +177,25 @@ def get_pending_users_for_followup(hours: int = 1) -> List[Dict[str, Any]]:
                 datetime.fromisoformat(u["notified_at"].replace("Z", "")).timestamp() < cutoff]
     except Exception as e:
         logging.error(f"Error fetching pending users: {e}")
+        return []
+
+
+def get_followedup_users_to_reactivate(hours: int = 24) -> List[Dict[str, Any]]:
+    """Fetch users with status='followed_up' whose notified_at is older than X hours."""
+    if not KAPSO_API_KEY:
+        return []
+    
+    url = f"{KAPSO_BASE_URL}/platform/v1/db/users"
+    params = {"status": "eq.followed_up", "order": "notified_at.asc"}
+    try:
+        r = requests.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
+        r.raise_for_status()
+        users = r.json().get("data", [])
+        cutoff = datetime.utcnow().timestamp() - (hours * 3600)
+        return [u for u in users if u.get("notified_at") and 
+                datetime.fromisoformat(u["notified_at"].replace("Z", "")).timestamp() < cutoff]
+    except Exception as e:
+        logging.error(f"Error fetching followed_up users: {e}")
         return []
 
 def update_user_status(user_id: str, status: str, notified_at: Optional[str] = None) -> bool:

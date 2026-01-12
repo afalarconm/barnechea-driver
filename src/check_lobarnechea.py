@@ -18,6 +18,7 @@ from kapso_notifier import (  # noqa: E402
     send_whatsapp_message,
     get_active_users,
     get_pending_users_for_followup,
+    get_followedup_users_to_reactivate,
     update_user_status,
     _parse_iso_datetime,  # Reuse from kapso_notifier instead of duplicating
 )
@@ -60,13 +61,25 @@ def main() -> int:
     
     logging.info(f"Usuarios activos: {len(active_users)} total ({len(autobook_users)} auto-book, {len(notify_users)} notify-only)")
 
-    # 2) Send follow-ups to users pending >1 hour
+    # 2) Send ONE follow-up to users pending >1 hour, then mark as "followed_up"
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for user in pending_users:
         phone = user.get("phone", "")
-        if phone:
+        user_id = user.get("id")
+        if phone and user_id:
             msg = "¿Completaste tu reserva manual? Responde SÍ o DONE para desactivar las notificaciones."
-            send_whatsapp_message(phone, msg)
-            logging.info(f"Follow-up enviado a {phone}")
+            if send_whatsapp_message(phone, msg):
+                # Change status to "followed_up" so they won't receive another follow-up
+                update_user_status(user_id, "followed_up", notified_at=now_utc)
+                logging.info(f"Follow-up enviado a {phone}, status → followed_up")
+
+    # 3) Reactivate users who have been in "followed_up" status for >24 hours
+    users_to_reactivate = get_followedup_users_to_reactivate(hours=24)
+    for user in users_to_reactivate:
+        user_id = user.get("id")
+        if user_id:
+            update_user_status(user_id, "active")
+            logging.info(f"Usuario {user.get('phone', user_id)} reactivado después de 24hrs")
 
     # Use any registered user's RUT (digits-only) for endpoints that require patientRut
     patient_rut = ""
@@ -75,7 +88,7 @@ def main() -> int:
         if patient_rut:
             break
 
-    # 3) Descubrir lineId(s)
+    # 4) Descubrir lineId(s)
     targets = discover_line_ids_for_targets()
     if not targets:
         # fallback a mano si no encontramos nada
@@ -83,7 +96,7 @@ def main() -> int:
 
     logging.info("Líneas objetivo: " + str(targets))
 
-    # 4) Consultar disponibilidad
+    # 5) Consultar disponibilidad
     for name, lid in targets.items():
         try:
             days = get_available_days(lid, NUMBER_OF_MONTH, patient_rut=patient_rut)
@@ -101,7 +114,7 @@ def main() -> int:
         times = get_available_times(lid, first_day, patient_rut=patient_rut)
         reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
         
-        # 5) Attempt auto-booking for ALL autobook users (FIFO), consuming slots as we succeed.
+        # 6) Attempt auto-booking for ALL autobook users (FIFO), consuming slots as we succeed.
         booked_users = autobook_fifo(
             line_id=lid,
             day=first_day,
@@ -111,7 +124,7 @@ def main() -> int:
         )
         booked_user_ids = {u.get("id") for u in booked_users if u.get("id")}
 
-        # 6) Notify all notify-only users
+        # 7) Notify all notify-only users
         notified_user_ids = []
         for user in active_users:
             # Skip if already booked
@@ -139,7 +152,7 @@ def main() -> int:
             elif send_whatsapp_message(phone, msg):
                 notified_user_ids.append(user.get("id"))
         
-        # 7) Update notified users to pending status
+        # 8) Update notified users to pending status
         now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for user_id in notified_user_ids:
             update_user_status(user_id, "pending", notified_at=now_iso)
