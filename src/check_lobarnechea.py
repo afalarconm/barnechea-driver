@@ -11,16 +11,13 @@ from config import (  # noqa: E402
     EXIT_AVAILABILITY_HANDLED,
     FALLBACK_LINE_ID,
     NUMBER_OF_MONTH,
-    PUBLIC_URL,
 )
 from kapso_notifier import (  # noqa: E402
     send_template_message,
-    send_whatsapp_message,
     get_active_users,
-    get_pending_users_for_followup,
-    get_followedup_users_to_reactivate,
+    get_pending_users_to_reactivate,
     update_user_status,
-    _parse_iso_datetime,  # Reuse from kapso_notifier instead of duplicating
+    _parse_iso_datetime,
 )
 from discovery import discover_line_ids_for_targets  # noqa: E402
 from availability import get_available_days, get_available_times, normalize_patient_rut  # noqa: E402
@@ -42,7 +39,7 @@ def main() -> int:
 
     # 1) Fetch users from Kapso
     active_users = get_active_users()
-    pending_users = get_pending_users_for_followup(hours=1)
+    users_to_reactivate = get_pending_users_to_reactivate(hours=24)
 
     # Defensive FIFO: ensure users are ordered by registration time (oldest first),
     # even if the upstream API ignores/changes ordering semantics.
@@ -51,8 +48,8 @@ def main() -> int:
         key=lambda u: (_parse_iso_datetime((u or {}).get("registered_at")), str((u or {}).get("id", ""))),
     )
 
-    # If there are no registered users at all, do nothing (skip API checks entirely).
-    if not active_users and not pending_users:
+    # If there are no users to process at all (including no reactivations), do nothing.
+    if not active_users and not users_to_reactivate:
         logging.info("No hay usuarios registrados en Kapso. No se realiza chequeo.")
         return 0
 
@@ -61,34 +58,32 @@ def main() -> int:
     
     logging.info(f"Usuarios activos: {len(active_users)} total ({len(autobook_users)} auto-book, {len(notify_users)} notify-only)")
 
-    # 2) Send ONE follow-up to users pending >1 hour, then mark as "followed_up"
-    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    for user in pending_users:
-        phone = user.get("phone", "")
-        user_id = user.get("id")
-        if phone and user_id:
-            msg = "¿Completaste tu reserva manual? Responde SÍ o DONE para desactivar las notificaciones."
-            if send_whatsapp_message(phone, msg):
-                # Change status to "followed_up" so they won't receive another follow-up
-                update_user_status(user_id, "followed_up", notified_at=now_utc)
-                logging.info(f"Follow-up enviado a {phone}, status → followed_up")
-
-    # 3) Reactivate users who have been in "followed_up" status for >24 hours
-    users_to_reactivate = get_followedup_users_to_reactivate(hours=24)
+    # 2) Reactivate users who have been pending for >24 hours (no response to buttons)
     for user in users_to_reactivate:
         user_id = user.get("id")
         if user_id:
-            update_user_status(user_id, "active")
-            logging.info(f"Usuario {user.get('phone', user_id)} reactivado después de 24hrs")
+            if update_user_status(user_id, "active"):
+                # Treat as active for the current run to avoid waiting for the next poll.
+                user["status"] = "active"
+                active_users.append(user)
+                logging.info(f"Usuario {user.get('phone', user_id)} reactivado después de 24hrs sin respuesta")
+
+    # Recompute FIFO ordering and mode splits after possible reactivations.
+    active_users = sorted(
+        active_users,
+        key=lambda u: (_parse_iso_datetime((u or {}).get("registered_at")), str((u or {}).get("id", ""))),
+    )
+    autobook_users = [u for u in active_users if u.get("mode") == "autobook"]
+    notify_users = [u for u in active_users if u.get("mode") == "notify"]
 
     # Use any registered user's RUT (digits-only) for endpoints that require patientRut
     patient_rut = ""
-    for user in (active_users + pending_users):
+    for user in active_users:
         patient_rut = normalize_patient_rut(str(user.get("rut", "") or ""))
         if patient_rut:
             break
 
-    # 4) Descubrir lineId(s)
+    # 3) Descubrir lineId(s)
     targets = discover_line_ids_for_targets()
     if not targets:
         # fallback a mano si no encontramos nada
@@ -96,7 +91,7 @@ def main() -> int:
 
     logging.info("Líneas objetivo: " + str(targets))
 
-    # 5) Consultar disponibilidad
+    # 4) Consultar disponibilidad
     for name, lid in targets.items():
         try:
             days = get_available_days(lid, NUMBER_OF_MONTH, patient_rut=patient_rut)
@@ -112,20 +107,20 @@ def main() -> int:
         logging.info(f"Disponibilidad para {name} el {first_day} (total días: {len(days)})")
 
         times = get_available_times(lid, first_day, patient_rut=patient_rut)
-        reserva_url = f"https://{PUBLIC_URL}.saltala.com/#/fila/{lid}/reserva"
         
-        # 6) Attempt auto-booking for ALL autobook users (FIFO), consuming slots as we succeed.
+        # 5) Attempt auto-booking for ALL autobook users (FIFO), consuming slots as we succeed.
         booked_users = autobook_fifo(
             line_id=lid,
             day=first_day,
             times=times,
             autobook_users=autobook_users,
-            reserva_url=reserva_url,
         )
         booked_user_ids = {u.get("id") for u in booked_users if u.get("id")}
 
-        # 7) Notify all notify-only users
+        # 6) Notify all non-booked active users with interactive template (buttons)
         notified_user_ids = []
+        button_payloads = ["booked", "not_booked"]  # Payloads for "Ya reserve" / "No pude" buttons
+        
         for user in active_users:
             # Skip if already booked
             if user.get("id") in booked_user_ids:
@@ -135,24 +130,11 @@ def main() -> int:
             if not phone:
                 continue
             
-            # Build notification message
-            msg = (
-                f"🎉 ¡Hay disponibilidad para *{name}*!\n"
-                f"Primer día: {first_day}\n"
-            )
-            if times:
-                msg += f"Horarios ({len(times)}): {', '.join(times[:5])}{'…' if len(times) > 5 else ''}\n"
-            else:
-                msg += "No se pudieron obtener los horarios.\n"
-            msg += f"Días ({len(days)}): {', '.join(days[:10])}{'…' if len(days) > 10 else ''}\n"
-            msg += f"Reserva: {reserva_url}"
-            
-            if send_template_message(phone, "slot_available", [first_day]):
-                notified_user_ids.append(user.get("id"))
-            elif send_whatsapp_message(phone, msg):
+            # Send template with Quick Reply buttons
+            if send_template_message(phone, "slot_available_v2", [first_day], button_payloads):
                 notified_user_ids.append(user.get("id"))
         
-        # 8) Update notified users to pending status
+        # 7) Update notified users to pending status
         now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         for user_id in notified_user_ids:
             update_user_status(user_id, "pending", notified_at=now_iso)

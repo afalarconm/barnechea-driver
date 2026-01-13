@@ -2,14 +2,12 @@ import os
 import logging
 import requests
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 KAPSO_API_KEY = os.getenv("KAPSO_API_KEY", "")
 KAPSO_PHONE_NUMBER_ID = os.getenv("KAPSO_PHONE_NUMBER_ID", "")
 KAPSO_BASE_URL = "https://api.kapso.ai"
 KAPSO_TEMPLATE_LANGUAGE_CODE = os.getenv("KAPSO_TEMPLATE_LANGUAGE_CODE", "es_AR")
-# Optional: comma-separated parameter names if your template uses NAMED params
-# e.g. "day" or "first_day"
 KAPSO_TEMPLATE_PARAM_NAMES = [s.strip() for s in os.getenv("KAPSO_TEMPLATE_PARAM_NAMES", "").split(",") if s.strip()]
 
 TIMEOUT = (10, 20)
@@ -87,8 +85,13 @@ def send_whatsapp_message(to_phone: str, text: str) -> bool:
         logging.error(f"WhatsApp error to {to_phone_norm}: {e}")
         return False
 
-def send_template_message(to_phone: str, template_name: str, params: List[str]) -> bool:
-    """Send a template message (for business-initiated conversations)."""
+def send_template_message(
+    to_phone: str,
+    template_name: str,
+    params: List[str],
+    button_payloads: Optional[List[str]] = None
+) -> bool:
+    """Send a template message with optional Quick Reply button payloads."""
     to_phone_norm = _normalize_whatsapp_to(to_phone)
     if not to_phone_norm:
         logging.error(f"Invalid/empty phone for template send: raw={to_phone!r}")
@@ -109,6 +112,17 @@ def send_template_message(to_phone: str, template_name: str, params: List[str]) 
         body_params.append(entry)
 
     components = [{"type": "body", "parameters": body_params}]
+    
+    # Add button payloads if provided (for Quick Reply buttons)
+    if button_payloads:
+        for idx, payload_str in enumerate(button_payloads):
+            components.append({
+                "type": "button",
+                "sub_type": "quick_reply",
+                "index": str(idx),
+                "parameters": [{"type": "payload", "payload": payload_str}]
+            })
+
     payload = {
         "messaging_product": "whatsapp",
         "to": to_phone_norm,
@@ -143,7 +157,8 @@ def get_active_users() -> List[Dict[str, Any]]:
     try:
         r = requests.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
         r.raise_for_status()
-        users = r.json().get("data", [])
+        payload = r.json()
+        users = payload.get("data", [])
         if isinstance(users, list):
             # Defensive FIFO ordering: do not rely solely on API-side ordering.
             # Sort earliest registrations first; unknown/missing timestamps go last.
@@ -154,48 +169,52 @@ def get_active_users() -> List[Dict[str, Any]]:
                     str((u or {}).get("id", "")),
                 ),
             )
+            if not users:
+                logging.warning(
+                    "Kapso DB returned 0 active users. "
+                    f"status_code={r.status_code} url={getattr(r, 'url', url)!r} keys={list(payload.keys())}"
+                )
         return users
+    except requests.HTTPError as e:
+        resp_text = (e.response.text[:500] if e.response is not None and e.response.text else "")
+        logging.error(f"Error fetching active users: {e} {resp_text}")
+        return []
     except Exception as e:
-        logging.error(f"Error fetching users: {e}")
+        logging.error(f"Error fetching active users: {e}")
         return []
 
-def get_pending_users_for_followup(hours: int = 1) -> List[Dict[str, Any]]:
-    """Fetch users pending for more than X hours."""
+def get_pending_users_to_reactivate(hours: int = 24) -> List[Dict[str, Any]]:
+    """Fetch pending users who haven't responded in X hours (to reactivate)."""
     if not KAPSO_API_KEY:
         return []
     
     url = f"{KAPSO_BASE_URL}/platform/v1/db/users"
-    # Query pending users - notified_at filtering will be done in Python
     params = {"status": "eq.pending", "order": "notified_at.asc"}
     try:
         r = requests.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
         r.raise_for_status()
-        users = r.json().get("data", [])
-        # Filter by time in Python (Kapso may not support timestamp math in query)
-        cutoff = datetime.utcnow().timestamp() - (hours * 3600)
-        return [u for u in users if u.get("notified_at") and 
-                datetime.fromisoformat(u["notified_at"].replace("Z", "")).timestamp() < cutoff]
+        payload = r.json()
+        users = payload.get("data", [])
+        if not isinstance(users, list):
+            logging.error(
+                "Kapso DB response 'data' is not a list for pending users. "
+                f"type={type(users).__name__} status_code={r.status_code} url={getattr(r, 'url', url)!r}"
+            )
+            return []
+        # Filter by time in Python - reactivate users pending for more than X hours
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result: List[Dict[str, Any]] = []
+        for u in users:
+            dt = _parse_iso_datetime((u or {}).get("notified_at"))
+            if dt != datetime.max.replace(tzinfo=timezone.utc) and dt < cutoff:
+                result.append(u)
+        return result
+    except requests.HTTPError as e:
+        resp_text = (e.response.text[:500] if e.response is not None and e.response.text else "")
+        logging.error(f"Error fetching pending users: {e} {resp_text}")
+        return []
     except Exception as e:
         logging.error(f"Error fetching pending users: {e}")
-        return []
-
-
-def get_followedup_users_to_reactivate(hours: int = 24) -> List[Dict[str, Any]]:
-    """Fetch users with status='followed_up' whose notified_at is older than X hours."""
-    if not KAPSO_API_KEY:
-        return []
-    
-    url = f"{KAPSO_BASE_URL}/platform/v1/db/users"
-    params = {"status": "eq.followed_up", "order": "notified_at.asc"}
-    try:
-        r = requests.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
-        r.raise_for_status()
-        users = r.json().get("data", [])
-        cutoff = datetime.utcnow().timestamp() - (hours * 3600)
-        return [u for u in users if u.get("notified_at") and 
-                datetime.fromisoformat(u["notified_at"].replace("Z", "")).timestamp() < cutoff]
-    except Exception as e:
-        logging.error(f"Error fetching followed_up users: {e}")
         return []
 
 def update_user_status(user_id: str, status: str, notified_at: Optional[str] = None) -> bool:

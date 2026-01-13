@@ -3,9 +3,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from config import PUBLIC_URL
 from saltala_api import post, SaltalaAPIError
-from kapso_notifier import send_whatsapp_message, update_user_status
+from kapso_notifier import send_template_message, update_user_status
 
 
 def _user_display(user: Dict[str, Any]) -> str:
@@ -169,7 +168,6 @@ def autobook_fifo(
     day: str,
     times: List[str],
     autobook_users: List[Dict[str, Any]],
-    reserva_url: str,
 ) -> List[Dict[str, Any]]:
     """
     Try to book as many autobook users as possible, in FIFO order, consuming available times.
@@ -183,7 +181,6 @@ def autobook_fifo(
         day: Date in YYYY-MM-DD format
         times: List of available times in HH:MM format
         autobook_users: List of users to book (should be sorted FIFO)
-        reserva_url: Reservation URL for success message
         
     Returns:
         List of users successfully booked (in booking order)
@@ -227,13 +224,8 @@ def autobook_fifo(
             else:
                 logging.warning(f"Auto-book: booked user has no id; cannot mark inactive: {_user_display(user)}")
 
-            success_msg = (
-                f"✅ ¡Cita agendada exitosamente!\n"
-                f"Día: {day}\n"
-                f"Hora: {t}\n"
-                f"Reserva: {reserva_url}"
-            )
-            send_whatsapp_message(user.get("phone", ""), success_msg)
+            # Send booking confirmation via template (required for 24h+ window)
+            send_template_message(user.get("phone", ""), "booking_confirmed", [day, t])
 
             booked.append(user)
             remaining_times.remove(t)  # consume slot so it can't be reused
