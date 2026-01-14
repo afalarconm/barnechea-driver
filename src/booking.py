@@ -1,6 +1,7 @@
 """Appointment booking logic for Saltala API."""
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from saltala_api import post, SaltalaAPIError
@@ -14,7 +15,14 @@ def _user_display(user: Dict[str, Any]) -> str:
     return phone or uid or "<unknown-user>"
 
 
-def block_slot(line_id: int, date: str, time: str) -> bool:
+def _normalize_rut(rut: str) -> str:
+    """Normalize RUT to digits-only format (remove hyphens, dots, etc.)."""
+    if not rut:
+        return ""
+    return re.sub(r"\D", "", rut)
+
+
+def block_slot(line_id: int, date: str, time: str, patient_rut: str = "") -> bool:
     """
     Add a temporary reservation block for a slot.
     
@@ -22,14 +30,19 @@ def block_slot(line_id: int, date: str, time: str) -> bool:
         line_id: Line ID
         date: Date in YYYY-MM-DD format
         time: Time in HH:MM format
+        patient_rut: Patient RUT (will be normalized to digits-only)
         
     Returns:
         True if block was successful, False otherwise
     """
     full_datetime_str = f"{date}T{time}:00"
-    block_payload = {"lineId": line_id, "date": full_datetime_str}
+    normalized_rut = _normalize_rut(patient_rut)
     
-    logging.info(f"[BLOCK] Attempting to block slot: lineId={line_id}, datetime={full_datetime_str}")
+    block_payload: Dict[str, Any] = {"lineId": line_id, "date": full_datetime_str}
+    if normalized_rut:
+        block_payload["patientRut"] = normalized_rut
+    
+    logging.info(f"[BLOCK] Attempting to block slot: lineId={line_id}, datetime={full_datetime_str}, rut={normalized_rut or 'none'}")
     logging.info(f"[BLOCK] Payload: {block_payload}")
     
     try:
@@ -100,7 +113,7 @@ def generate_reservation(
         return False
 
 
-def remove_block(line_id: int, date: str, time: str) -> None:
+def remove_block(line_id: int, date: str, time: str, patient_rut: str = "") -> None:
     """
     Remove a temporary reservation block.
     
@@ -108,9 +121,14 @@ def remove_block(line_id: int, date: str, time: str) -> None:
         line_id: Line ID
         date: Date in YYYY-MM-DD format
         time: Time in HH:MM format
+        patient_rut: Patient RUT (will be normalized to digits-only)
     """
     full_datetime_str = f"{date}T{time}:00"
-    block_payload = {"lineId": line_id, "date": full_datetime_str}
+    normalized_rut = _normalize_rut(patient_rut)
+    
+    block_payload: Dict[str, Any] = {"lineId": line_id, "date": full_datetime_str}
+    if normalized_rut:
+        block_payload["patientRut"] = normalized_rut
     
     logging.info(f"[UNBLOCK] Removing temporary block: lineId={line_id}, datetime={full_datetime_str}")
     
@@ -155,9 +173,9 @@ def book_appointment(
         logging.warning(f"[BOOK] ABORT: Missing required user data - rut={bool(user_rut)}, first_name={bool(user_first_name)}, last_name={bool(user_last_name)}")
         return False
 
-    # Step 1: Add a temporary reservation block
+    # Step 1: Add a temporary reservation block (include RUT for validation)
     logging.info("[BOOK] Step 1/2: Blocking slot...")
-    if not block_slot(line_id, date, time):
+    if not block_slot(line_id, date, time, patient_rut=user_rut):
         logging.error("[BOOK] FAILED at Step 1: Could not block slot")
         return False
 
@@ -172,7 +190,7 @@ def book_appointment(
     if not success:
         logging.error("[BOOK] FAILED at Step 2: Could not generate reservation, cleaning up block...")
         # Cleanup: remove temporary block
-        remove_block(line_id, date, time)
+        remove_block(line_id, date, time, patient_rut=user_rut)
     else:
         logging.info("[BOOK] ========== BOOKING SUCCESSFUL! ==========")
     
