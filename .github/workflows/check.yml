@@ -58,6 +58,7 @@ jobs:
           RUNTIME=1140 # 19 minutes
           SLEEP_TIME=60 # Check every 60 seconds
           TICK=0
+          AVAILABILITY_FOUND=false
           
           echo "=========================================="
           echo "Starting monitoring window at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
@@ -75,7 +76,8 @@ jobs:
             # Exit code 42 means "availability was found and processed" (notify/booking).
             # In that case, stop early and hand off to the next relay run.
             if [ "${EXIT_CODE}" -eq 42 ]; then
-              echo "[${CURRENT_TIME} UTC] Availability handled (exit 42). Stopping early for relay."
+              echo "[${CURRENT_TIME} UTC] ✅ Availability handled (exit 42). Stopping early for relay."
+              AVAILABILITY_FOUND=true
               break
             elif [ "${EXIT_CODE}" -eq 0 ]; then
               echo "[${CURRENT_TIME} UTC] Poll #${TICK} completed successfully"
@@ -104,6 +106,11 @@ jobs:
             # 3. Wait for the next tick
             sleep "$SLEEP_TIME"
           done
+          
+          # Exit with 0 if availability was found (exit code 42), so GitHub Actions doesn't mark it as an error
+          if [ "$AVAILABILITY_FOUND" = "true" ]; then
+            exit 0
+          fi
 
       - name: Trigger next relay run
         env:
