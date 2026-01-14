@@ -123,23 +123,7 @@ def parse_available_times(payload: Any) -> List[str]:
             for it in obj:
                 scan(it, depth + 1)
         elif isinstance(obj, dict):
-            # claves típicas para times/slots
-            for key in (
-                "times",
-                "hours",
-                "availableTimes",
-                "availableHours",
-                "slots",
-                "items",
-                "data",
-                "results",
-                # Saltala payloads seen in the wild
-                "reservations",
-                "reservationsById",
-            ):
-                if key in obj:
-                    scan(obj[key], depth + 1)
-            # objetos con campos de hora
+            # Check for time-like fields first
             for key in (
                 "hour",
                 "time",
@@ -156,6 +140,26 @@ def parse_available_times(payload: Any) -> List[str]:
             ):
                 if key in obj:
                     add_time_like(obj[key], key)
+            
+            # Recurse into known collection keys
+            for key in (
+                "times",
+                "hours",
+                "availableTimes",
+                "availableHours",
+                "slots",
+                "items",
+                "data",
+                "results",
+                "reservations",
+            ):
+                if key in obj:
+                    scan(obj[key], depth + 1)
+            
+            # IMPORTANT: reservationsById is a dict with ID keys -> recurse into VALUES
+            if "reservationsById" in obj and isinstance(obj["reservationsById"], dict):
+                for reservation in obj["reservationsById"].values():
+                    scan(reservation, depth + 1)
         else:
             add_time_like(obj)
 
