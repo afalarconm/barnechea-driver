@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BarnecheaDriver - Alertas de disponibilidad para licencias de conducir</title>
-    <meta name="description" content="Recibe alertas instantáneas por WhatsApp cuando haya disponibilidad para renovar o sacar tu licencia de conducir en Lo Barnechea.">
+    <meta name="description" content="Recibe alertas instantáneas por WhatsApp cuando haya disponibilidad para renovar tu licencia de conducir en Lo Barnechea.">
     <link rel="icon" type="image/png" href="https://lobarnechea.cl/wp-content/uploads/2023/11/cropped-LB-logo-1-1.png">
     <link rel="apple-touch-icon" href="https://lobarnechea.cl/wp-content/uploads/2023/11/cropped-LB-logo-1-1.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -137,8 +137,8 @@
             display: inline-flex;
             align-items: center;
             gap: 0.5rem;
-            background: var(--teal-light);
-            color: var(--teal-dark);
+            background: #d4f5d4;
+            color: #127a27;      
             padding: 0.5rem 1rem;
             border-radius: 100px;
             font-size: 0.85rem;
@@ -149,7 +149,7 @@
         .badge-dot {
             width: 8px;
             height: 8px;
-            background: var(--teal);
+            background: #22c55e;
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
@@ -265,14 +265,17 @@
         .phone-avatar {
             width: 40px;
             height: 40px;
-            background: var(--teal);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: white;
-            font-weight: 700;
-            font-size: 0.9rem;
+            overflow: hidden;
+        }
+
+        .phone-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
         }
 
         .phone-contact {
@@ -792,11 +795,11 @@
             <div class="hero-content">
                 <div class="badge">
                     <span class="badge-dot"></span>
-                    En vivo
+                    Beta
                 </div>
                 <h1>Nunca más pierdas una <span>hora disponible</span> para tu licencia</h1>
                 <p class="hero-text">
-                    Recibe alertas instantáneas por WhatsApp cuando haya disponibilidad para renovar tu licencia de conducir en Lo Barnechea.
+                    Recibe alertas por WhatsApp cuando haya disponibilidad para renovar tu licencia de conducir en Lo Barnechea.
                 </p>
                 <div class="cta-group">
                     <a href="https://wa.me/12029882345" class="btn btn-primary" target="_blank" rel="noopener">
@@ -813,13 +816,15 @@
                     <div class="float-icon">🔔</div>
                     <div class="float-text">
                         <strong>Alerta instantánea</strong>
-                        <span>Cada 5 minutos</span>
+                        <span>Revisamos 24/7</span>
                     </div>
                 </div>
                 <div class="phone-mockup">
                     <div class="phone-screen">
                         <div class="phone-header">
-                            <div class="phone-avatar">BD</div>
+                            <div class="phone-avatar">
+                                <img src="https://lobarnechea.cl/wp-content/uploads/2023/11/cropped-LB-logo-1-1.png" alt="BarnecheaDriver">
+                            </div>
                             <div class="phone-contact">
                                 <div class="phone-contact-name">BarnecheaDriver</div>
                                 <div class="phone-contact-status">en línea</div>
@@ -874,7 +879,7 @@
                 <div class="step">
                     <div class="step-number">3</div>
                     <h3>Recibe tu alerta</h3>
-                    <p>Cuando haya disponibilidad, te avisamos de inmediato por WhatsApp. Si no respondes, te recordaremos después de 1 hora. Si no cancelas, serás reactivado después de 24 horas para seguir recibiendo alertas.</p>
+                    <p>Cuando haya disponibilidad, te avisamos de inmediato por WhatsApp. Si no respondes, te recordaremos después de 1 hora.</p>
                 </div>
             </div>
         </div>
@@ -891,7 +896,7 @@
                 <div class="feature">
                     <div class="feature-icon">⚡</div>
                     <div>
-                        <h4>Monitoreo cada 5 minutos</h4>
+                        <h4>Monitoreo 24/7</h4>
                         <p>Revisamos constantemente la disponibilidad en el sistema de Lo Barnechea.</p>
                     </div>
                 </div>
@@ -906,14 +911,14 @@
                     <div class="feature-icon">📱</div>
                     <div>
                         <h4>Notificación por WhatsApp</h4>
-                        <p>Sin apps extra. Recibe todo directo en tu WhatsApp.</p>
+                        <p>Sin apps extra. Recibe directo en tu WhatsApp.</p>
                     </div>
                 </div>
                 <div class="feature">
                     <div class="feature-icon">💸</div>
                     <div>
                         <h4>Completamente gratis</h4>
-                        <p>No cobramos nada. Es un proyecto <a href="https://github.com/afalarconm/barnechea-driver" target="_blank" rel="noopener noreferrer">open source</a>.</p>
+                        <p>Por ahora, no cobramos nada. Es un proyecto <a href="https://github.com/afalarconm/barnechea-driver" target="_blank" rel="noopener noreferrer">open source</a>.</p>
                     </div>
                 </div>
             </div>
@@ -934,6 +939,15 @@
                     </button>
                     <div class="faq-answer">
                         <p>Sí, el servicio es completamente gratuito. Es un proyecto personal <a href="https://github.com/afalarconm/barnechea-driver" target="_blank" rel="noopener noreferrer">open source</a>.</p>
+                    </div>
+                </div>
+                <div class="faq-item">
+                    <button class="faq-question">
+                        ¿Para que necesitan mi RUT?
+                        <span class="faq-icon">+</span>
+                    </button>
+                    <div class="faq-answer">
+                        <p>La pagina de Lo Barnechea requiere tu RUT para mostrar las horas disponibles. No compartimos tu información con nadie.</p>
                     </div>
                 </div>
                 <div class="faq-item">
