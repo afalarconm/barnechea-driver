@@ -29,13 +29,15 @@ def block_slot(line_id: int, date: str, time: str) -> bool:
     full_datetime_str = f"{date}T{time}:00"
     block_payload = {"lineId": line_id, "date": full_datetime_str}
     
+    logging.info(f"[BLOCK] Attempting to block slot: lineId={line_id}, datetime={full_datetime_str}")
+    logging.info(f"[BLOCK] Payload: {block_payload}")
+    
     try:
-        logging.info(f"Bloqueando temporalmente el horario {date} {time}...")
-        post("/schedule/public/addReservationTemporalBlock", json_data=block_payload)
-        logging.info("Bloqueo temporal exitoso.")
+        result = post("/schedule/public/addReservationTemporalBlock", json_data=block_payload)
+        logging.info(f"[BLOCK] SUCCESS! Response: {result}")
         return True
     except SaltalaAPIError as e:
-        logging.error(f"No se pudo bloquear el horario: {e}")
+        logging.error(f"[BLOCK] FAILED to block slot {date} {time}: {e}")
         return False
 
 
@@ -85,13 +87,16 @@ def generate_reservation(
     
     form_data = {'payload': json.dumps(reservation_payload)}
     
+    logging.info(f"[RESERVE] Attempting reservation: lineId={line_id}, datetime={full_datetime_str}")
+    logging.info(f"[RESERVE] User: rut={user_rut}, name={user_first_name} {user_last_name}, email={user_email}, phone={user_phone}")
+    logging.info(f"[RESERVE] Full payload: {reservation_payload}")
+    
     try:
-        logging.info("Enviando datos para generar la reserva...")
         result = post("/schedule/public/generateReservation", form_payload=form_data)
-        logging.info(f"Reserva generada exitosamente! Respuesta: {str(result)[:300]}")
+        logging.info(f"[RESERVE] SUCCESS! Response: {str(result)[:500]}")
         return True
     except SaltalaAPIError as e:
-        logging.error(f"Falló el intento de generar la reserva: {e}")
+        logging.error(f"[RESERVE] FAILED to generate reservation: {e}")
         return False
 
 
@@ -107,11 +112,13 @@ def remove_block(line_id: int, date: str, time: str) -> None:
     full_datetime_str = f"{date}T{time}:00"
     block_payload = {"lineId": line_id, "date": full_datetime_str}
     
+    logging.info(f"[UNBLOCK] Removing temporary block: lineId={line_id}, datetime={full_datetime_str}")
+    
     try:
-        logging.info("Intentando liberar el bloqueo temporal...")
-        post("/schedule/public/removeReservationTemporalBlock", json_data=block_payload)
+        result = post("/schedule/public/removeReservationTemporalBlock", json_data=block_payload)
+        logging.info(f"[UNBLOCK] Block removed successfully: {result}")
     except SaltalaAPIError as e_remove:
-        logging.error(f"No se pudo liberar el bloqueo: {e_remove}")
+        logging.error(f"[UNBLOCK] FAILED to remove block: {e_remove}")
 
 
 def book_appointment(
@@ -140,15 +147,22 @@ def book_appointment(
     Returns:
         True if booking was successful, False otherwise
     """
+    logging.info("[BOOK] ========== Starting booking flow ==========")
+    logging.info(f"[BOOK] Slot: lineId={line_id}, date={date}, time={time}")
+    logging.info(f"[BOOK] User: rut={user_rut}, first={user_first_name}, last={user_last_name}, email={user_email}, phone={user_phone}")
+    
     if not user_rut or not user_first_name or not user_last_name:
-        logging.warning("Faltan datos de usuario (RUT, nombre, apellido), no se puede reservar.")
+        logging.warning(f"[BOOK] ABORT: Missing required user data - rut={bool(user_rut)}, first_name={bool(user_first_name)}, last_name={bool(user_last_name)}")
         return False
 
     # Step 1: Add a temporary reservation block
+    logging.info("[BOOK] Step 1/2: Blocking slot...")
     if not block_slot(line_id, date, time):
+        logging.error("[BOOK] FAILED at Step 1: Could not block slot")
         return False
 
     # Step 2: Generate the reservation with user details
+    logging.info("[BOOK] Step 2/2: Generating reservation...")
     success = generate_reservation(
         line_id, date, time,
         user_rut, user_first_name, user_last_name,
@@ -156,8 +170,11 @@ def book_appointment(
     )
     
     if not success:
+        logging.error("[BOOK] FAILED at Step 2: Could not generate reservation, cleaning up block...")
         # Cleanup: remove temporary block
         remove_block(line_id, date, time)
+    else:
+        logging.info("[BOOK] ========== BOOKING SUCCESSFUL! ==========")
     
     return success
 
@@ -185,25 +202,45 @@ def autobook_fifo(
     Returns:
         List of users successfully booked (in booking order)
     """
-    if not times or not autobook_users:
+    logging.info("[AUTOBOOK] ============================================")
+    logging.info("[AUTOBOOK] Starting FIFO auto-booking")
+    logging.info(f"[AUTOBOOK] lineId={line_id}, day={day}")
+    logging.info(f"[AUTOBOOK] Available times ({len(times)}): {times}")
+    logging.info(f"[AUTOBOOK] Users to process ({len(autobook_users)}): {[_user_display(u) for u in autobook_users]}")
+    
+    if not times:
+        logging.warning("[AUTOBOOK] No times available, nothing to book")
+        return []
+    
+    if not autobook_users:
+        logging.warning("[AUTOBOOK] No autobook users, nothing to book")
         return []
 
     remaining_times = list(times)
     booked: List[Dict[str, Any]] = []
 
-    for user in autobook_users:
+    for idx, user in enumerate(autobook_users):
+        logging.info(f"[AUTOBOOK] --- Processing user {idx+1}/{len(autobook_users)}: {_user_display(user)} ---")
+        
         if not remaining_times:
+            logging.warning("[AUTOBOOK] No more times available, stopping")
             break
+
+        # Log all user fields for debugging
+        logging.info(f"[AUTOBOOK] User data: id={user.get('id')}, rut={user.get('rut')}, first_name={user.get('first_name')}, last_name={user.get('last_name')}, email={user.get('email')}, phone={user.get('phone')}, mode={user.get('mode')}")
 
         # Skip users missing required booking data to avoid burning time on slots.
         if not (user.get("rut") and user.get("first_name") and user.get("last_name")):
-            logging.warning(f"Auto-book: skipping user missing required fields: {_user_display(user)}")
+            logging.warning(f"[AUTOBOOK] SKIP user {_user_display(user)} - missing required fields: rut={bool(user.get('rut'))}, first_name={bool(user.get('first_name'))}, last_name={bool(user.get('last_name'))}")
             continue
 
+        user_booked = False
         attempts = 0
+        initial_times_count = len(remaining_times)
+        
         for t in list(remaining_times):
             attempts += 1
-            logging.info(f"Auto-book: trying {_user_display(user)} -> {day} {t} ({attempts}/{len(remaining_times)})")
+            logging.info(f"[AUTOBOOK] Attempt {attempts}/{initial_times_count}: {_user_display(user)} -> {day} {t}")
 
             ok = book_appointment(
                 line_id,
@@ -216,23 +253,33 @@ def autobook_fifo(
                 user.get("phone"),
             )
             if not ok:
+                logging.info(f"[AUTOBOOK] Attempt {attempts} FAILED, trying next time slot...")
                 continue
 
+            logging.info(f"[AUTOBOOK] BOOKING SUCCESS for {_user_display(user)} at {day} {t}")
+            
             user_id = user.get("id")
             if user_id:
+                logging.info(f"[AUTOBOOK] Marking user {user_id} as inactive...")
                 update_user_status(user_id, "inactive")
             else:
-                logging.warning(f"Auto-book: booked user has no id; cannot mark inactive: {_user_display(user)}")
+                logging.warning(f"[AUTOBOOK] User has no id, cannot mark inactive: {_user_display(user)}")
 
             # Send booking confirmation via template (required for 24h+ window)
+            logging.info(f"[AUTOBOOK] Sending confirmation message to {user.get('phone', '')}...")
             send_template_message(user.get("phone", ""), "booking_confirmed", [day, t])
 
             booked.append(user)
             remaining_times.remove(t)  # consume slot so it can't be reused
-            logging.info(f"Auto-book: success for {_user_display(user)} at {day} {t}")
+            user_booked = True
             break
 
-        if attempts == len(remaining_times) and remaining_times:
-            logging.warning(f"Auto-book: no slot could be booked for {_user_display(user)} (tried {attempts})")
+        if not user_booked:
+            logging.warning(f"[AUTOBOOK] Could not book any slot for {_user_display(user)} after {attempts} attempts")
 
+    logging.info("[AUTOBOOK] ============================================")
+    logging.info(f"[AUTOBOOK] SUMMARY: {len(booked)}/{len(autobook_users)} users booked, {len(remaining_times)} times remaining")
+    logging.info(f"[AUTOBOOK] Booked users: {[_user_display(u) for u in booked]}")
+    logging.info("[AUTOBOOK] ============================================")
+    
     return booked

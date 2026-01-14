@@ -39,21 +39,34 @@ def parse_available_days(payload: Any) -> List[str]:
         Sorted list of date strings in YYYY-MM-DD format
     """
     days: List[str] = []
+    original_payload = payload  # keep for logging
 
     def maybe_date_str(x: Any) -> Optional[str]:
-        if isinstance(x, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", x):
-            return x
+        if isinstance(x, str):
+            # Try exact match YYYY-MM-DD
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", x):
+                return x
+            # Try extracting from ISO datetime like "2026-01-15T10:00:00"
+            m = re.match(r"(\d{4}-\d{2}-\d{2})", x)
+            if m:
+                return m.group(1)
         if isinstance(x, dict):
-            for k in ("date", "day", "dayDate", "fecha"):
+            # Try various possible key names for date
+            for k in ("date", "day", "dayDate", "fecha", "availableDate", "reservationDate"):
                 v = x.get(k)
-                if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
-                    return v
+                if isinstance(v, str):
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                        return v
+                    m = re.match(r"(\d{4}-\d{2}-\d{2})", v)
+                    if m:
+                        return m.group(1)
         return None
 
     # payload puede ser { days: [...] } o { data: [...] } o lista directa
     if isinstance(payload, dict):
-        for key in ("days", "availableDays", "dates", "data", "items"):
+        for key in ("days", "availableDays", "dates", "data", "items", "results", "reservations"):
             if key in payload:
+                logging.debug(f"[PARSE_DAYS] Found key '{key}' in payload")
                 payload = payload[key]
                 break
 
@@ -67,7 +80,15 @@ def parse_available_days(payload: Any) -> List[str]:
         for token in re.split(r"[,\s]+", payload.strip()):
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
                 days.append(token)
-    return sorted(set(days))
+    
+    result = sorted(set(days))
+    
+    if not result and original_payload:
+        logging.warning(f"[PARSE_DAYS] Could not parse any days from payload. Type: {type(original_payload).__name__}")
+        if isinstance(original_payload, dict):
+            logging.warning(f"[PARSE_DAYS] Available keys: {list(original_payload.keys())}")
+    
+    return result
 
 
 def parse_available_times(payload: Any) -> List[str]:
@@ -83,18 +104,24 @@ def parse_available_times(payload: Any) -> List[str]:
         Sorted list of time strings in HH:MM format
     """
     times: List[str] = []
+    original_payload = payload  # keep for logging
+    found_keys: List[str] = []  # track which keys we found times in
 
-    def add_time_like(value: Any) -> None:
+    def add_time_like(value: Any, source_key: str = "") -> None:
         if isinstance(value, str):
-            # Normalizar HH:MM[:SS]
-            m = re.search(r"\b(\d{2}:\d{2})(?::\d{2})?\b", value)
+            # Normalizar HH:MM[:SS] - also handle ISO datetime "2026-01-15T10:00:00"
+            m = re.search(r"(?:T|\b)(\d{2}:\d{2})(?::\d{2})?\b", value)
             if m:
                 times.append(m.group(1))
+                if source_key and source_key not in found_keys:
+                    found_keys.append(source_key)
 
-    def scan(obj: Any) -> None:
+    def scan(obj: Any, depth: int = 0) -> None:
+        if depth > 10:  # prevent infinite recursion
+            return
         if isinstance(obj, list):
             for it in obj:
-                scan(it)
+                scan(it, depth + 1)
         elif isinstance(obj, dict):
             # claves típicas para times/slots
             for key in (
@@ -105,12 +132,13 @@ def parse_available_times(payload: Any) -> List[str]:
                 "slots",
                 "items",
                 "data",
+                "results",
                 # Saltala payloads seen in the wild
                 "reservations",
                 "reservationsById",
             ):
                 if key in obj:
-                    scan(obj[key])
+                    scan(obj[key], depth + 1)
             # objetos con campos de hora
             for key in (
                 "hour",
@@ -119,17 +147,34 @@ def parse_available_times(payload: Any) -> List[str]:
                 "start",
                 "hora",
                 "from",
+                "date",  # sometimes full datetime is in 'date' field
                 # Saltala payloads sometimes include ISO datetimes here
                 "reservationDate",
                 "reservation_date",
+                "dateTime",
+                "datetime",
             ):
                 if key in obj:
-                    add_time_like(obj[key])
+                    add_time_like(obj[key], key)
         else:
             add_time_like(obj)
 
     scan(payload)
-    return sorted(set(times))
+    result = sorted(set(times))
+    
+    if result:
+        logging.debug(f"[PARSE_TIMES] Found {len(result)} times from keys: {found_keys}")
+    elif original_payload:
+        logging.warning(f"[PARSE_TIMES] Could not parse any times from payload. Type: {type(original_payload).__name__}")
+        if isinstance(original_payload, dict):
+            logging.warning(f"[PARSE_TIMES] Available keys: {list(original_payload.keys())}")
+        if isinstance(original_payload, list) and len(original_payload) > 0:
+            sample = original_payload[0]
+            logging.warning(f"[PARSE_TIMES] First item type: {type(sample).__name__}")
+            if isinstance(sample, dict):
+                logging.warning(f"[PARSE_TIMES] First item keys: {list(sample.keys())}")
+    
+    return result
 
 
 def get_available_days(
@@ -150,23 +195,31 @@ def get_available_days(
     """
     # Mock: devolver días configurados
     if MOCK_DAYS:
+        logging.info(f"[MOCK] Returning mock days: {MOCK_DAYS}")
         return sorted(set(MOCK_DAYS))
 
     params: dict = {"lineId": line_id, "numberOfMonth": months}
     if patient_rut:
         params["patientRut"] = patient_rut
     
+    logging.info(f"[DAYS] Fetching available days for lineId={line_id}, months={months}, rut={'***' if patient_rut else 'none'}")
+    
     try:
         payload = get("/schedule/public/getAvailableReservationDays", params)
         days = parse_available_days(payload)
+        
+        # Always log the result for debugging
+        logging.info(f"[DAYS] Raw payload type={type(payload).__name__}, parsed {len(days)} days: {days[:10]}{'...' if len(days) > 10 else ''}")
+        
         if DEBUG_LOG_PAYLOADS:
-            logging.info(
-                f"Payload días sample (lineId={line_id}): "
-                f"{str(payload)[:200]} -> {days[:5]}{'…' if len(days) > 5 else ''}"
-            )
+            logging.info(f"[DAYS] Full payload: {str(payload)[:500]}")
+        
+        if not days and payload:
+            logging.warning(f"[DAYS] Got payload but parsed 0 days. Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
+        
         return days
     except SaltalaAPIError as e:
-        logging.error(f"Error getting available days for line {line_id}: {e}")
+        logging.error(f"[DAYS] Error getting available days for line {line_id}: {e}")
         return []
 
 
@@ -188,6 +241,7 @@ def get_available_times(
     """
     # Mock: devolver horarios configurados
     if MOCK_TIMES:
+        logging.info(f"[MOCK] Returning mock times: {MOCK_TIMES}")
         return sorted(set(MOCK_TIMES))
 
     offset = offset_for_date(date)
@@ -198,18 +252,26 @@ def get_available_times(
     if patient_rut:
         params["patientRut"] = patient_rut
 
+    logging.info(f"[TIMES] Fetching times for lineId={line_id}, date={date}, offset={offset}")
+
     try:
         payload = get("/schedule/public/reservations", params=params)
         times = parse_available_times(payload)
+        
+        # Always log the result
+        logging.info(f"[TIMES] Raw payload type={type(payload).__name__}, parsed {len(times)} times: {times}")
+        
         if DEBUG_LOG_PAYLOADS:
-            logging.info(
-                f"Payload horas (GET /reservations): {str(payload)[:200]} -> {len(times)} times"
-            )
+            logging.info(f"[TIMES] Full payload: {str(payload)[:1000]}")
+        
+        if not times and payload:
+            logging.warning(f"[TIMES] Got payload but parsed 0 times. Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}")
+        
         return times
     except SaltalaAPIError as e:
         if isinstance(e.__cause__, requests.HTTPError) and e.__cause__.response is not None:
             if e.__cause__.response.status_code == 404:
-                # treat as no slots / not found
+                logging.info(f"[TIMES] 404 response - no slots available for {date}")
                 return []
-        logging.error(f"Error obteniendo horarios via /reservations: {e}")
+        logging.error(f"[TIMES] Error fetching times via /reservations: {e}")
         return []

@@ -34,7 +34,8 @@ TZ_NAME = os.getenv("TZ_NAME", "America/Santiago")  # used to compute correct of
 TZ_OFFSET = os.getenv("TZ_OFFSET", "")  # optional override like "-03:00" (takes precedence over TZ_NAME)
 
 # Debug Configuration
-DEBUG_LOG_PAYLOADS = os.getenv("DEBUG_LOG_PAYLOADS", "0") not in ("", "0", "false", "False")
+_debug_raw = os.getenv("DEBUG_LOG_PAYLOADS", "false").lower().strip()
+DEBUG_LOG_PAYLOADS = _debug_raw in ("1", "true", "yes", "on")
 
 # Exit Code
 EXIT_AVAILABILITY_HANDLED = 42
